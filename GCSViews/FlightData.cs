@@ -30,6 +30,7 @@ using ZedGraph;
 using LogAnalyzer = MissionPlanner.Utilities.LogAnalyzer;
 using TableLayoutPanelCellPosition = System.Windows.Forms.TableLayoutPanelCellPosition;
 using UnauthorizedAccessException = System.UnauthorizedAccessException;
+using System.Net.Sockets;
 
 // written by michael oborne
 
@@ -137,6 +138,10 @@ namespace MissionPlanner.GCSViews
 
         string updateBindingSourceThreadName = "";
 
+        // Binh edit
+        // X-Plane connect client
+        UdpClient XpcClient;
+        // Binh end
         public FlightData()
         {
             log.Info("Ctor Start");
@@ -462,7 +467,52 @@ namespace MissionPlanner.GCSViews
                 playingLog = true;
             }
         }
-
+        int sendDREF(char[] drefs, float values)
+        {
+            // Setup command
+            // Max size is technically unlimited.
+            // Setup command
+            Byte[] tempArray;
+            Byte[] buffer = new byte[500];
+            // Header: POSI for moving aircraft with X-Plane connect NASA plugin
+            buffer[0] = (byte)'D';
+            buffer[1] = (byte)'R';
+            buffer[2] = (byte)'E';
+            buffer[3] = (byte)'F';
+            int drefLen = drefs.Length;
+            buffer[5] = (byte)drefLen;
+            int pos = 6;         // start after the 5th byte                      
+            if (pos + drefLen + 2 > 500)
+            {
+                Console.WriteLine("sendDREF", "About to overrun the send buffer!");
+                return -4;
+            }
+            if (drefLen > 255)
+            {
+                Console.WriteLine("sendDREF", "dref is too long. Must be less than 256 characters.");
+                return -1;
+            }
+            // Copy dref to buffer
+            byte[] _d = drefs.Select(c => (byte)c).ToArray();
+            Buffer.BlockCopy(_d, 0, buffer, pos, drefLen);
+            pos += drefLen;
+            buffer[pos] = 1;
+            pos++;
+            tempArray = BitConverter.GetBytes(values);
+            Buffer.BlockCopy(tempArray, 0, buffer, pos, 4);
+            // Send command            
+            try
+            {
+                XpcClient.Send(buffer, buffer.Length);
+                return 0;
+            }
+            catch (Exception)
+            {
+                Console.WriteLine("setDREF", "Failed to send command");
+                return -3;
+                throw;
+            }
+        }
         public void CheckBatteryShow()
         {
             // ensure battery display is on - also set in hud if current is updated
@@ -2159,7 +2209,13 @@ namespace MissionPlanner.GCSViews
             hud1.doResize();
 
             prop = new Propagation(gMapControl1);
-
+            // Binh edit
+            XpcClient = new UdpClient();
+            XpcClient.ExclusiveAddressUse = false;
+            XpcClient.Connect(IPAddress.Parse("127.0.0.1"), Int32.Parse("49009"));
+            char[] _dref = "sim/operation/override/override_planepath".ToCharArray();
+            sendDREF(_dref, 1);
+            // Binh end
             thisthread = new Thread(mainloop);
             thisthread.Name = "FD Mainloop";
             thisthread.IsBackground = true;
@@ -2970,6 +3026,22 @@ namespace MissionPlanner.GCSViews
                             "here");
                         OpenGLtest2.instance.WPs = MainV2.comPort.MAV.wps.Values.Select(a => (Locationwp) a).ToList();
                     }
+
+                    // Binh edit
+                    double[] POSI = new double[7];
+                    POSI[0] = MainV2.comPort.MAV.cs.lat;                            // Lat                                             
+                    POSI[1] = MainV2.comPort.MAV.cs.lng;                            // Lon                        
+                    POSI[2] = MainV2.comPort.MAV.cs.altasl + 5.91495f;              // Alt
+                    POSI[3] = MainV2.comPort.MAV.cs.roll;               // Pitch
+                    POSI[4] = MainV2.comPort.MAV.cs.pitch;              // Roll
+                    POSI[5] = MainV2.comPort.MAV.cs.yaw;                // Heading
+                    POSI[6] = 1;                                        // Gear
+                    if (POSI[0] >= - 90 && POSI[0] <= 90 && POSI[1] >= -180 && POSI[1] <= 180 && !(POSI[0] == 0 && POSI[1] == 0))
+                    {
+                        // Set position of the player aircraft
+                        sendPOSI(POSI, 0);
+                    }                    
+                    // Binh end
 
                     // update vario info
                     Vario.SetValue(MainV2.comPort.MAV.cs.climbrate);
@@ -4699,6 +4771,69 @@ namespace MissionPlanner.GCSViews
                 {
                 }
             });
+        }
+
+        int sendPOSI(double[] values, int ac)
+        {
+            // Validate input
+            if (ac < 0 || ac > 20)
+            {
+                Console.WriteLine("sendPOSI", "aircraft should be a value between 0 and 20.");
+                return -1;
+            }
+
+            // Setup command
+            Byte[] tempArray;
+            Byte[] buffer = new byte[46];
+            // Header: POSI for moving aircraft with X-Plane connect NASA plugin
+            buffer[0] = (byte)'P';
+            buffer[1] = (byte)'O';
+            buffer[2] = (byte)'S';
+            buffer[3] = (byte)'I';
+            buffer[4] = 0xff;           //Placeholder for message length
+            buffer[5] = (byte)ac;
+            int byteOffset = 6;         // start after the 5th byte 
+            int i; // iterator
+
+            //for (i = byteOffset; i < 46; i++)
+            //{
+            //    buffer[i] = 1;
+            //}
+            for (i = 0; i < 7; i++) // double for lat/lon/h
+            {
+                double val = -998;
+                val = values[i];
+                if (i < 3) /* lat/lon/h */
+                {
+                    tempArray = BitConverter.GetBytes(val);
+                    for (int j = 0; j < 8; j++)
+                    {
+                        buffer[j + i * 8 + byteOffset] = tempArray[j];
+                    }
+                }
+                else /* attitude and gear */
+                {
+                    float f = (float)val;
+                    tempArray = BitConverter.GetBytes(f);
+                    for (int j = 0; j < 4; j++)
+                    {
+                        buffer[j + i * 4 + 18] = tempArray[j];
+                    }
+                }
+            }
+
+            // Send Command
+            try
+            {
+                XpcClient.Send(buffer, buffer.Length);
+                return 0;
+            }
+            catch (Exception)
+            {
+                Console.WriteLine("sendPOSI", "Failed to send command");
+                return -3;
+                throw;
+            }
         }
 
         private void updateMapZoom(int zoom)
